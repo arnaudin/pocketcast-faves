@@ -1,0 +1,13 @@
+# Downloaded audio and the manifests describing it: personal listening history,
+# and ~8 GB of podcast files that have no business in a git repo.
+downloads/
+
+# Written by older versions of this script; held the account email.
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
