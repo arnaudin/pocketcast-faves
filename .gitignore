@@ -2,6 +2,9 @@
 # and ~8 GB of podcast files that have no business in a git repo.
 downloads/
 
+# Ledger of what has been downloaded: episode titles, i.e. listening history.
+.pcfaves-state.json
+
 # Written by older versions of this script; held the account email.
 config.json
 

@@ -36,12 +36,33 @@ security add-generic-password -U -s pcfaves-pocketcasts-refresh -a default -w "$
 python3 pcfaves.py
 ```
 
-That is the on-demand command. Re-runs are incremental: an episode already on
-disk is skipped, so only newly starred ones get fetched. Matching is by
-filename, because the byte size a feed advertises often disagrees with what its
-CDN actually serves; size is used only to spot a badly truncated file and
-re-fetch it. If the refresh token expires or is revoked, the script stops and
-reprints the setup steps.
+That is the on-demand command. Re-runs are incremental: only episodes that have
+never been downloaded get fetched. If the refresh token expires or is revoked,
+the script stops and reprints the setup steps.
+
+## Staging, and how re-runs stay incremental
+
+`downloads/` is a staging area. Move, rename, and reorganize what lands there
+however you like — the script never looks at the folder to decide what to skip.
+
+What it reads instead is a ledger at `.pcfaves-state.json`, which records the
+episode IDs already fetched plus the date of each run. That is deliberately
+*not* kept inside `downloads/`, so emptying the staging folder never makes the
+script forget its work, and you never end up maintaining a second copy of your
+library just to track what you have.
+
+```bash
+python3 pcfaves.py --status     # last run, counts, and what keeps failing
+```
+
+A note on why the ledger tracks IDs rather than just a cutoff date: the API
+reports *that* an episode is starred, never *when* it was starred. Filtering on
+a date alone would silently skip an old episode you starred today, because its
+publish date predates the last run. The ledger has no such blind spot.
+
+Episodes that fail keep their place in a retry list and are attempted on every
+run, so a temporary outage fixes itself. `--status` shows the attempt count for
+each, which is how you spot a permanently dead URL.
 
 ## Options
 
@@ -52,11 +73,15 @@ reprints the setup steps.
 | `--out DIR` | Where to put files (default `./downloads`) |
 | `--jobs N` | Parallel downloads (default 3) |
 | `--relogin` | Force a token refresh before fetching |
+| `--status` | Show the ledger and exit; makes no network calls |
+| `--redownload` | Ignore the ledger and fetch everything again |
+| `--state PATH` | Use a different ledger file |
 
 ## Output
 
 ```
-downloads/
+.pcfaves-state.json     the ledger: what has been fetched, and when
+downloads/              staging; safe to empty after you file things away
   starred.json          normalized list + fetch timestamp
   starred.csv           same, spreadsheet-friendly
   failures.txt          only if something failed

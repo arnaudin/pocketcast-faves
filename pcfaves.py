@@ -287,15 +287,126 @@ def human(n):
 
 # ---------------------------------------------------------------- main
 
+# ---------------------------------------------------------------- state
+
+STATE_VERSION = 1
+
+
+def iso_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_state(path):
+    """The ledger of what has already been fetched.
+
+    Kept outside the download folder on purpose: `downloads/` is a staging
+    area you are expected to empty, so presence of a file there cannot be
+    the record of what has been downloaded.
+    """
+    try:
+        with open(path) as f:
+            state = json.load(f)
+    except FileNotFoundError:
+        state = {}
+    except json.JSONDecodeError:
+        print(f"State file at {path} is unreadable; starting a fresh ledger.",
+              file=sys.stderr)
+        state = {}
+    state.setdefault("version", STATE_VERSION)
+    state.setdefault("last_run", None)
+    state.setdefault("runs", 0)
+    state.setdefault("downloaded", {})
+    state.setdefault("failed", {})
+    return state
+
+
+def save_state(path, state):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def record_download(state, row, path, out_dir):
+    state["downloaded"][row["uuid"]] = {
+        "show": row["show"],
+        "title": row["title"],
+        "published": row["published"],
+        "file": os.path.relpath(path, out_dir),
+        "at": iso_now(),
+        "bytes": os.path.getsize(path) if os.path.exists(path) else 0,
+    }
+    state["failed"].pop(row["uuid"], None)
+
+
+def record_failure(state, row, reason):
+    prev = state["failed"].get(row["uuid"], {})
+    state["failed"][row["uuid"]] = {
+        "show": row["show"],
+        "title": row["title"],
+        "url": row["audio_url"],
+        "attempts": prev.get("attempts", 0) + 1,
+        "last_error": reason,
+        "at": iso_now(),
+    }
+
+
+def adopt_existing(state, out_dir, rows, by_uuid):
+    """Seed a new ledger from audio already sitting in the staging folder.
+
+    Only runs when there is no ledger yet, so upgrading from an earlier
+    version does not re-download everything already on disk.
+    """
+    adopted = 0
+    for row in rows:
+        if row["uuid"] in state["downloaded"]:
+            continue
+        path = target_path(out_dir, row, by_uuid.get(row["uuid"], {}))
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            record_download(state, row, path, out_dir)
+            state["downloaded"][row["uuid"]]["adopted"] = True
+            adopted += 1
+    return adopted
+
+
+def print_status(state, path):
+    if not os.path.exists(path):
+        print(f"No ledger yet at {path}. The next run creates one.")
+        return
+    last = state["last_run"] or "never"
+    print(f"Ledger      : {path}")
+    print(f"Last run    : {last}   ({state['runs']} run(s) recorded)")
+    print(f"Downloaded  : {len(state['downloaded'])} episodes")
+    if state["failed"]:
+        print(f"Failing     : {len(state['failed'])} episode(s), retried every run")
+        for info in sorted(state["failed"].values(),
+                           key=lambda i: -i.get("attempts", 0)):
+            print(f"  {info.get('attempts', 0):2}x  {info['show']} - {info['title']}"[:78])
+            print(f"        {info.get('last_error', '')}"[:78])
+
+
 def main():
     ap = argparse.ArgumentParser(description="Download Pocket Casts starred episodes")
-    ap.add_argument("--out", default=os.path.join(HERE, "downloads"))
+    ap.add_argument("--out", default=os.path.join(HERE, "downloads"),
+                    help="staging folder for downloads (default ./downloads)")
+    ap.add_argument("--state", default=os.path.join(HERE, ".pcfaves-state.json"),
+                    help="ledger of what has been downloaded")
     ap.add_argument("--no-audio", action="store_true", help="metadata only")
     ap.add_argument("--limit", type=int, default=0, help="only the N newest")
     ap.add_argument("--jobs", type=int, default=3, help="parallel downloads")
     ap.add_argument("--relogin", action="store_true",
-                help="force a token refresh before fetching")
+                    help="force a token refresh before fetching")
+    ap.add_argument("--status", action="store_true",
+                    help="show the ledger and exit, without contacting the API")
+    ap.add_argument("--redownload", action="store_true",
+                    help="ignore the ledger and fetch everything again")
     args = ap.parse_args()
+
+    state = load_state(args.state)
+
+    if args.status:
+        print_status(state, args.state)
+        return
 
     token = get_token(force=args.relogin)
 
@@ -317,7 +428,7 @@ def main():
     by_uuid = {e.get("uuid"): e for e in episodes}
 
     os.makedirs(args.out, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
+    stamp = iso_now()
 
     with open(os.path.join(args.out, "starred.json"), "w") as f:
         json.dump({"fetched_at": stamp, "count": len(rows), "episodes": rows},
@@ -331,51 +442,87 @@ def main():
     if args.no_audio:
         return
 
+    first_ledger = not state["downloaded"] and not state["failed"]
+    if first_ledger:
+        adopted = adopt_existing(state, args.out, rows, by_uuid)
+        if adopted:
+            print(f"Adopted {adopted} episode(s) already in {args.out} "
+                  f"into a new ledger.")
+        save_state(args.state, state)
+
+    print(f"Last run: {state['last_run'] or 'never'}")
+
+    if args.redownload:
+        pending = [r for r in rows if r["audio_url"]]
+        print(f"--redownload: fetching all {len(pending)} again.")
+    else:
+        pending = [r for r in rows
+                   if r["audio_url"] and r["uuid"] not in state["downloaded"]]
+        retries = sum(1 for r in pending if r["uuid"] in state["failed"])
+        fresh = len(pending) - retries
+        print(f"{len(state['downloaded'])} already downloaded, "
+              f"{fresh} new since last run, {retries} retrying after failure.")
+
     # --limit caps what we download; the manifest above always covers everything
     if args.limit:
-        rows = rows[:args.limit]
+        pending = pending[:args.limit]
 
-    total = sum(r["size_bytes"] for r in rows)
-    print(f"Downloading audio (~{human(total)} if nothing is cached) "
+    if not pending:
+        state["last_run"] = stamp
+        state["runs"] += 1
+        save_state(args.state, state)
+        print("Nothing to do.")
+        return
+
+    total = sum(r["size_bytes"] for r in pending)
+    print(f"\nDownloading {len(pending)} episode(s), ~{human(total)}, "
           f"with {args.jobs} parallel jobs...\n")
 
-    jobs = []
-    for r in rows:
-        if not r["audio_url"]:
-            continue
-        jobs.append((r, target_path(args.out, r, by_uuid.get(r["uuid"], {}))))
+    jobs = [(r, target_path(args.out, r, by_uuid.get(r["uuid"], {})))
+            for r in pending]
 
     done = skipped = failed = 0
-    failures = []
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futs = {pool.submit(download, r["audio_url"], p, r["size_bytes"]): (r, p)
-                for r, p in jobs}
-        for i, fut in enumerate(as_completed(futs), 1):
-            r, p = futs[fut]
-            try:
-                status = fut.result()
-            except Exception as e:
-                status = f"fail: {e}"
-            label = f'{r["show"]} — {r["title"]}'[:70]
-            if status == "ok":
-                done += 1
-                print(f"[{i}/{len(jobs)}] ok      {label}")
-            elif status == "skip":
-                skipped += 1
-                print(f"[{i}/{len(jobs)}] have    {label}")
-            else:
-                failed += 1
-                failures.append((label, status, r["audio_url"]))
-                print(f"[{i}/{len(jobs)}] FAILED  {label}  ({status})")
+    try:
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            futs = {pool.submit(download, r["audio_url"], p, r["size_bytes"]):
+                    (r, p) for r, p in jobs}
+            for i, fut in enumerate(as_completed(futs), 1):
+                r, p = futs[fut]
+                try:
+                    status = fut.result()
+                except Exception as e:
+                    status = f"fail: {e}"
+                label = f'{r["show"]} - {r["title"]}'[:70]
+                if status in ("ok", "skip"):
+                    done += status == "ok"
+                    skipped += status == "skip"
+                    record_download(state, r, p, args.out)
+                    word = "ok     " if status == "ok" else "have   "
+                    print(f"[{i}/{len(jobs)}] {word} {label}")
+                else:
+                    failed += 1
+                    record_failure(state, r, status)
+                    print(f"[{i}/{len(jobs)}] FAILED {label}  ({status})")
+                if i % 10 == 0:
+                    save_state(args.state, state)
+    finally:
+        state["last_run"] = stamp
+        state["runs"] += 1
+        save_state(args.state, state)
 
-    print(f"\nDownloaded {done}, already had {skipped}, failed {failed}.")
-    if failures:
+    print(f"\nDownloaded {done}, already on disk {skipped}, failed {failed}.")
+    if state["failed"]:
         log = os.path.join(args.out, "failures.txt")
         with open(log, "w") as f:
-            for label, status, url in failures:
-                f.write(f"{label}\n  {status}\n  {url}\n\n")
-        print(f"Failure details: {log}")
-    print(f"Files are in {args.out}")
+            for info in state["failed"].values():
+                f.write(f"{info['show']} - {info['title']}\n"
+                        f"  {info.get('last_error','')} "
+                        f"(attempt {info.get('attempts',0)})\n"
+                        f"  {info['url']}\n\n")
+        print(f"{len(state['failed'])} episode(s) still failing; details: {log}")
+    print(f"Staged in {args.out}; ledger at {args.state}")
+    print("Move or rename those files freely - the ledger, not the folder, "
+          "is what stops them downloading again.")
 
 
 if __name__ == "__main__":
