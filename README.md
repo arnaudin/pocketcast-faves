@@ -43,7 +43,7 @@ the script stops and reprints the setup steps.
 ## Staging, and how re-runs stay incremental
 
 `downloads/` is a staging area. Move, rename, and reorganize what lands there
-however you like — the script never looks at the folder to decide what to skip.
+however you like; the script never looks at the folder to decide what to skip.
 
 What it reads instead is a ledger at `.pcfaves-state.json`, which records the
 episode IDs already fetched plus the date of each run. That is deliberately
@@ -91,7 +91,7 @@ downloads/              staging; safe to empty after you file things away
 
 ## Notes
 
-- Audio comes from each podcast's own CDN — the same file the app downloads.
+- Audio comes from each podcast's own CDN, the same file the app downloads.
   Shows that expire old episodes will fail; those land in `failures.txt`.
 - Clear stored tokens with:
 
@@ -99,3 +99,8 @@ downloads/              staging; safe to empty after you file things away
 security delete-generic-password -s pcfaves-pocketcasts-refresh
 security delete-generic-password -s pcfaves-pocketcasts-token
 ```
+
+## License
+
+MIT; see [LICENSE](LICENSE). Not affiliated with Pocket Casts. It uses the same private
+API as the web player, so it may break if that changes.
